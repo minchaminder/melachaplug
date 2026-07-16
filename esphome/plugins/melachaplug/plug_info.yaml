@@ -58,6 +58,22 @@ switch:
     restore_mode: ${relay_restore_mode}    # defaults to the same as the relay
     inverted: ${led_inverted}
 
+# Hold the physical button ~10s to enter WiFi setup (fallback AP + captive portal).
+# Short click still toggles the relay. 10s is intentional so it cannot be done by accident.
+script:
+  - id: enter_wifi_setup
+    mode: single
+    then:
+      - logger.log: "WiFi setup: starting fallback AP / captive portal"
+      - switch.turn_on: flash_led
+      - lambda: |-
+          // Clear captive-portal saved credentials and force the fallback AP.
+          // Works for preflashed units that have no compile-time WiFi SSID/password.
+          id(wifi_sta).set_ap_timeout(1);
+          id(wifi_sta).disable();
+          id(wifi_sta).clear_sta();
+          id(wifi_sta).enable();
+
 binary_sensor:
   - platform: gpio
     id: button_1
@@ -68,6 +84,25 @@ binary_sensor:
       inverted: true
     filters:
       - delayed_on: 10ms
+    on_press:
+      # After 8s of holding, blink once as a "keep holding" cue
+      - delay: 8s
+      - if:
+          condition:
+            binary_sensor.is_on: button_1
+          then:
+            - logger.log: "WiFi setup: keep holding to confirm..."
+            - switch.turn_on: built_in_led
+            - delay: 150ms
+            - switch.turn_off: built_in_led
     on_click:
-      then:
-        - switch.toggle: relay_1
+      # Normal use: short press toggles the relay
+      - min_length: 50ms
+        max_length: 2s
+        then:
+          - switch.toggle: relay_1
+      # Deliberate gesture: hold 10-60s -> WiFi setup AP
+      - min_length: 10s
+        max_length: 60s
+        then:
+          - script.execute: enter_wifi_setup
