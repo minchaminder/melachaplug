@@ -25,10 +25,15 @@ ota:
 captive_portal:
 
 wifi:
+  id: wifi_sta
   # Configure fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "${fallback_ssid}"
     password: ""                  # password of fallback hotspot
+  on_connect:
+    then:
+      - delay: 2s
+      - lambda: 'MelachaPlugNTP::configureFromSaved();'
 
 # Enable Web Interface
 web_server:
@@ -44,6 +49,10 @@ time:
     id: sntp_time
     timezone: ${timezone}
     update_interval: 60min
+    servers:
+      - 0.pool.ntp.org
+      - 1.pool.ntp.org
+      - 2.pool.ntp.org
     on_time_sync:
       then:
         - logger.log: --------- on_time_sync ---------"
@@ -120,6 +129,17 @@ switch:
       then:
         - logger.log: --------- on_turn_off inverted_shabbos_mode ---------"
         - lambda: 'MelachaPlug::runMelachaChecks();'
+  - platform: template
+    name: 27 Local NTP First
+    id: local_ntp_first
+    optimistic: true
+    restore_mode: ${local_ntp_first}
+    on_turn_on:
+      then:
+        - lambda: 'MelachaPlugNTP::configureFromSaved();'
+    on_turn_off:
+      then:
+        - lambda: 'MelachaPlugNTP::configureFromSaved();'
 
   # Shabbos mode switch - here is where we set what happens when it turns on and off
   - platform: template
@@ -184,6 +204,54 @@ text_sensor:
     elevation: ${deg_tzeit}°
 
 number:
+  - platform: template
+    name: 28 Local NTP IP 1
+    id: local_ntp_ip_1
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 1
+    mode: box
+    restore_value: true
+    initial_value: ${local_ntp_ip_1}
+    on_value:
+      - lambda: 'MelachaPlugNTP::configureFromSaved();'
+  - platform: template
+    name: 29 Local NTP IP 2
+    id: local_ntp_ip_2
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 1
+    mode: box
+    restore_value: true
+    initial_value: ${local_ntp_ip_2}
+    on_value:
+      - lambda: 'MelachaPlugNTP::configureFromSaved();'
+  - platform: template
+    name: 30 Local NTP IP 3
+    id: local_ntp_ip_3
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 1
+    mode: box
+    restore_value: true
+    initial_value: ${local_ntp_ip_3}
+    on_value:
+      - lambda: 'MelachaPlugNTP::configureFromSaved();'
+  - platform: template
+    name: 31 Local NTP IP 4
+    id: local_ntp_ip_4
+    optimistic: true
+    min_value: 0
+    max_value: 255
+    step: 1
+    mode: box
+    restore_value: true
+    initial_value: ${local_ntp_ip_4}
+    on_value:
+      - lambda: 'MelachaPlugNTP::configureFromSaved();'
   - platform: template
     name: 06 Minute Offset Start
     id: min_offset_start

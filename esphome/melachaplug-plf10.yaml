@@ -26,6 +26,11 @@ substitutions:
   inverted_shabbos_mode: "RESTORE_DEFAULT_OFF"     # to default relay on for Shabbos see esphome.io/components/switch/
 
   timezone: America/New_York            # check format at en.wikipedia.org/wiki/List_of_tz_database_time_zones
+  local_ntp_ip_1: "0"                   # optional local NTP IP for offline-friendly installs
+  local_ntp_ip_2: "0"
+  local_ntp_ip_3: "0"
+  local_ntp_ip_4: "0"
+  local_ntp_first: "RESTORE_DEFAULT_OFF" # keep public NTP preferred by default
   eretz_yisrael: "RESTORE_DEFAULT_OFF"  # switch to RESTORE_DEFAULT_ON if located in EY and do a one day Yom Tov
 
   latitude:  "40.669000"                # change to your location (important for proper zmanim) default:  40.669000
@@ -41,6 +46,7 @@ substitutions:
 esphome:
   includes:
     - header-files/hebrewcalender_melachaplug.h
+    - header-files/ntp_config_melachaplug.h
     - header-files/melachaplug_main.h
 
 packages:

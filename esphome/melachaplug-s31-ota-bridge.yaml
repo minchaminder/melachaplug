@@ -13,6 +13,12 @@ esphome:
   project:
     name: chabad-source.melachaplug-ota-bridge
     version: "2025.09.02.0"
+  on_boot:
+    - priority: 800
+      then:
+        - lambda: |-
+            pinMode(12, OUTPUT);
+            digitalWrite(12, LOW);
 
 esp8266:
   board: esp01_1m
@@ -35,11 +41,3 @@ web_server:
   include_internal: false
   css_url: ""
   js_url: ""
-
-switch:
-  - platform: gpio
-    name: Relay 1
-    id: relay_1
-    pin:
-      number: GPIO12
-    restore_mode: ALWAYS_OFF
