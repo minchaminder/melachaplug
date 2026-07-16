@@ -27,13 +27,17 @@ captive_portal:
 wifi:
   # Configure fallback hotspot (captive portal) in case wifi connection fails
   ap:
-    ssid: "${friendly_name} Fallback"
+    ssid: "${fallback_ssid}"
     password: ""                  # password of fallback hotspot
 
 # Enable Web Interface
 web_server:
   port: 80
   include_internal: true
+  version: 2
+  js_include: web_assets/www-v2.js
+  js_url: ""
+  css_url: ""
 
 time:
   - platform: sntp

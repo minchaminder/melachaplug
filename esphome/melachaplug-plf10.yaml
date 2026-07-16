@@ -15,6 +15,7 @@ esp8266:
 substitutions:
   device_name:   "melachaplug-plf10"      # access web UI using "device_name".local/ or it's IP
   friendly_name: "Melacha Plug plf10"
+  fallback_ssid: "Melacha Plug plf10 Fallback"
   
   relay_1_gpio:       "GPIO4"           # Switch this section
   button_1_gpio:      "GPIO13"          # based on your chip
@@ -39,21 +40,23 @@ substitutions:
 
 esphome:
   includes:
+    - header-files/hebrewcalender_melachaplug.h
     - header-files/melachaplug_main.h
 
 packages:
   # Local Packages saved in plugins folder
-  # melacha_config:      !include plugins/melachaplug/melacha_config.yaml     # Required
-  # plug_info:           !include plugins/melachaplug/plug_info.yaml          # Required
-  # location_info:       !include plugins/melachaplug/location_info.yaml      # Required
-  # optional_config:     !include plugins/melachaplug/optional_config.yaml    # Optional
+  melacha_config:      !include plugins/melachaplug/melacha_config.yaml     # Required
+  plug_info:           !include plugins/melachaplug/plug_info.yaml          # Required
+  location_info:       !include plugins/melachaplug/location_info.yaml      # Required
+  optional_config:     !include plugins/melachaplug/optional_config.yaml    # Optional
 
-  remote_package:
-    url: https://github.com/chabad-source/melachaplug/
-    ref: main                                                               # optional
-    files: 
-      - esphome/plugins/melachaplug/melacha_config.yaml                     # Required
-      - esphome/plugins/melachaplug/plug_info.yaml                          # Required
-      - esphome/plugins/melachaplug/location_info.yaml                      # Required
-      - esphome/plugins/melachaplug/optional_config.yaml                    # Optional
-    refresh: 1d                                                             # Optional
+  # Remote package option for online builds:
+  # remote_package:
+  #   url: https://github.com/chabad-source/melachaplug/
+  #   ref: main
+  #   files:
+  #     - esphome/plugins/melachaplug/melacha_config.yaml
+  #     - esphome/plugins/melachaplug/plug_info.yaml
+  #     - esphome/plugins/melachaplug/location_info.yaml
+  #     - esphome/plugins/melachaplug/optional_config.yaml
+  #   refresh: 1d

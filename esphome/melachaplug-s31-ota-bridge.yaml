@@ -1,0 +1,45 @@
+#--------------------------------------------
+#---------- S31 OTA Bridge Firmware ---------
+#--------------------------------------------
+#
+# Temporary bridge image for 1 MB ESP8266 S31 devices.
+# Flash this by web OTA when a full Melacha Plug image is too large for the
+# currently running firmware to accept. After this boots, connect to the
+# fallback AP and upload the full firmware from the local web page.
+
+esphome:
+  name: melachaplug-s31-ota-bridge
+  friendly_name: "Melacha Plug S31 OTA Bridge"
+  project:
+    name: chabad-source.melachaplug-ota-bridge
+    version: "2025.09.02.0"
+
+esp8266:
+  board: esp01_1m
+  restore_from_flash: false
+
+wifi:
+  ap:
+    ssid: "Melacha S31 OTA Bridge"
+    password: ""
+
+mdns:
+  disabled: true
+
+ota:
+  - platform: web_server
+
+web_server:
+  port: 80
+  version: 1
+  include_internal: false
+  css_url: ""
+  js_url: ""
+
+switch:
+  - platform: gpio
+    name: Relay 1
+    id: relay_1
+    pin:
+      number: GPIO12
+    restore_mode: ALWAYS_OFF
