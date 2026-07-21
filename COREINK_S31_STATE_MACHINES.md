@@ -40,12 +40,14 @@ but the externally visible behavior must match these states.
 ## CoreInk State Machine
 
 CoreInk has four coupled state regions: boot, time, network, and schedule.
+Profile B adds a settings-distribution region that can replace the schedule
+region for the maintainer-first architecture.
 
 ### CoreInk Boot
 
 | State | Entry action | Exit condition |
 | --- | --- | --- |
-| `BOOT_INIT` | Start display, load settings, load `controller_epoch`, load `schedule_generation`. | Settings storage read completed. |
+| `BOOT_INIT` | Start display, load settings, load `controller_epoch`, load `schedule_generation`, load `settings_generation`. | Settings storage read completed. |
 | `RTC_VALIDATE` | Read onboard RTC, check voltage-low/lost-clock flags, and run plausibility checks. | Time classified as `SYNCED`, `RTC_HOLDOVER`, or `TIME_INVALID`. |
 | `AP_START` | Start CoreInk SoftAP and local web UI. | AP is accepting clients. |
 | `SERVICE_READY` | Start time endpoint, registration endpoint, schedule/status endpoints. | Normal runtime. |
@@ -116,6 +118,30 @@ reservations are only optimizations.
 Any setting that affects time, zmanim, relay behavior, fail-safe policy, device
 identity, or schedule lifetime must trigger `GENERATE_SCHEDULE`.
 
+### CoreInk Profile B Settings Distribution
+
+Profile B keeps the calendar/zmanim engine on each S31. CoreInk distributes
+trusted time and settings, then monitors the S31-calculated result.
+
+| State | Entry action | Events |
+| --- | --- | --- |
+| `NO_VALID_TIME` | Do not send trusted time updates. Keep setup UI available. | Time becomes `SYNCED` or `RTC_HOLDOVER` -> `PUSH_TIME`. |
+| `PUSH_TIME` | Send authenticated time response/update to each registered S31. | Time ACK/status received -> `PUSH_SETTINGS`; time rejected -> `PARTIAL_CONFIRM`. |
+| `GENERATE_SETTINGS` | Serialize complete settings snapshot; increment `settings_generation`. | Snapshot signed -> `PUSH_SETTINGS`. |
+| `PUSH_SETTINGS` | Push full settings snapshot to each registered S31. | All ACK accepted -> `WAIT_POLICY_REPORT`; some timeout -> `PARTIAL_CONFIRM`. |
+| `WAIT_POLICY_REPORT` | Wait for S31 calculated current policy and next transition. | Reports agree -> `CONFIRMED`; disagreement -> `DISAGREEMENT_VISIBLE`. |
+| `CONFIRMED` | Display confirmed plug count, settings generation, and next transition reports. | Settings change, refresh deadline, firmware mismatch, or time-confidence change -> `GENERATE_SETTINGS`. |
+| `DISAGREEMENT_VISIBLE` | Show disagreeing S31, setting generation, calendar-engine version, and reported transition. | Re-push settings, request detailed report, or service action resolves -> `WAIT_POLICY_REPORT`. |
+| `PARTIAL_CONFIRM` | Show missing or stale plugs; retry with bounded backoff. | All ACK/report -> `WAIT_POLICY_REPORT`; settings expire -> keep warning. |
+
+Any setting that affects calendar, zmanim, timezone, location, relay behavior,
+button behavior, fail-safe policy, or clock uncertainty must trigger
+`GENERATE_SETTINGS`.
+
+CoreInk must not silently choose one disagreeing S31 as correct. A disagreement
+is a visible fault until a newer settings generation, firmware update, or manual
+service resolves it.
+
 ## S31 State Machine
 
 The S31 starts in the safest state the hardware and firmware can provide. There
@@ -131,6 +157,14 @@ cannot lock GPIO0 or energize a relay before the ESP8266 has booted the app.
 | `LOAD_CACHE` | Load cached schedule, `controller_epoch`, `schedule_generation`, protocol key, and device id. | Cache classified as present/corrupt/missing. |
 | `JOIN_AP` | Join configured CoreInk SoftAP. | Link up -> `REGISTER`; timeout -> `LINK_DOWN_FAILSAFE`. |
 | `REGISTER` | POST authenticated registration/status to CoreInk. | Registration accepted -> `SYNC_TIME`; rejected -> `PAIRING_REQUIRED_FAILSAFE`. |
+
+If ESP-NOW is selected as the S31 control transport, replace `JOIN_AP` and
+HTTP-style `REGISTER` with:
+
+| State | Entry action | Exit condition |
+| --- | --- | --- |
+| `INIT_ESPNOW` | Start Wi-Fi on configured channel, initialize ESP-NOW, load paired CoreInk MAC/key. | ESP-NOW ready -> `ESPNOW_HELLO`; timeout -> `LINK_DOWN_FAILSAFE`. |
+| `ESPNOW_HELLO` | Send authenticated hello/status frame with `boot_id`, generation state, and firmware version. | Authenticated CoreInk response -> `SYNC_TIME`; timeout -> `LINK_DOWN_FAILSAFE`. |
 
 The short-press button path must remain disabled through all boot states until a
 valid policy explicitly allows it.
@@ -162,14 +196,43 @@ schedule. It forbids freshness-dependent execution.
 When recovering after missed transitions, S31 applies only the latest effective
 policy at current UTC time. It does not replay each missed transition.
 
+### S31 Profile B Local Calendar
+
+In Profile B, S31 uses the same boot and time-validity states, but accepted
+settings replace accepted schedules as the input to execution.
+
+| State | Entry action | Events |
+| --- | --- | --- |
+| `LOAD_SETTINGS` | Load cached settings, `controller_epoch`, `settings_generation`, protocol key, and device id. | Settings classified as present/corrupt/missing. |
+| `TIME_INVALID_FAILSAFE` | Keep fail-safe; accept authenticated settings only as pending. | Time valid -> `VALIDATE_SETTINGS`. |
+| `VALIDATE_SETTINGS` | Check CRC, HMAC, epoch, `settings_generation`, validity window, settings schema, and calendar-engine compatibility. | Valid settings -> `CALCULATE_POLICY`; pending without time -> `STORED_PENDING_TIME`; invalid -> `NO_SETTINGS_FAILSAFE`. |
+| `STORED_PENDING_TIME` | Store authenticated newer settings but do not apply calendar-derived policy. | Time valid and freshness checks pass -> `CALCULATE_POLICY`; freshness fails -> `EXPIRED_FAILSAFE`. |
+| `CALCULATE_POLICY` | Run local Hebrew calendar/zmanim engine from current UTC and settings. | Calculation succeeds -> `READY_LOCAL_CALENDAR`; calculation fault -> `CALCULATION_FAILSAFE`. |
+| `READY_LOCAL_CALENDAR` | Apply latest locally calculated policy and arm next transition. Report calculation to CoreInk. | Settings refresh deadline -> `STALE_SETTINGS`; time uncertainty too high -> `TIME_INVALID_FAILSAFE`; transition due -> `APPLY_TRANSITION`. |
+| `STALE_SETTINGS` | Continue executing if still inside `valid_until_utc`; report stale settings. | New settings accepted -> `CALCULATE_POLICY`; hard expiry -> `EXPIRED_FAILSAFE`. |
+| `CALCULATION_FAILSAFE` | Enter configured fail-safe with reason `calendar_calculation_failed`. | New valid settings/firmware/service action -> `CALCULATE_POLICY`. |
+
+Profile B rules:
+
+- Invalid local time never forbids storing a newer authenticated settings
+  snapshot. It forbids applying calendar-derived policy.
+- S31 reports `settings_generation`, `calendar_engine_version`,
+  `calculation_fingerprint`, current policy, and next transition after each
+  calculation.
+- CoreInk disagreement does not automatically change relay state. The S31
+  continues according to its valid local calculation unless its own uncertainty
+  or settings validity rules require fail-safe.
+- If settings expire, S31 enters the configured fail-safe state even if its
+  local software clock is still running.
+
 ### S31 Relay Execution
 
 | State | Entry action | Events |
 | --- | --- | --- |
 | `APPLY_CURRENT_POLICY` | Set relay output, button lock, and LED to `current_policy`. | Output command succeeds -> ACK application; fails -> `APPLY_FAILED_FAILSAFE`. |
 | `APPLY_TRANSITION` | Set relay output, button lock, and LED for due transition. | Output command succeeds -> ACK application; fails -> `APPLY_FAILED_FAILSAFE`. |
-| `PROTECTED_FAILSAFE` | Set configured fail-safe relay, lock button, set protected LED. | Valid time and valid schedule received -> `READY_TO_EXECUTE`. |
-| `EXPIRED_FAILSAFE` | Same as protected fail-safe, with reason `schedule_expired`. | New valid schedule and time -> `READY_TO_EXECUTE`. |
+| `PROTECTED_FAILSAFE` | Set configured fail-safe relay, lock button, set protected LED. | Profile A: valid time and valid schedule -> `READY_TO_EXECUTE`; Profile B: valid time and valid settings -> `CALCULATE_POLICY`. |
+| `EXPIRED_FAILSAFE` | Same as protected fail-safe, with reason `schedule_expired` or `settings_expired`. | Profile A: new valid schedule and time -> `READY_TO_EXECUTE`; Profile B: new valid settings and time -> `CALCULATE_POLICY`. |
 | `APPLY_FAILED_FAILSAFE` | Same as protected fail-safe, with reason `apply_failed`. | Manual service or successful controller recovery policy -> `READY_TO_EXECUTE`. |
 
 Application ACK confirms firmware output state only. It does not prove
@@ -188,8 +251,17 @@ Before release, run these tests on real hardware:
 - S31 boots with CoreInk AP reachable but no valid time.
 - S31 accepts and stores a newer authenticated schedule while time is invalid.
 - S31 refuses to execute that pending schedule until time becomes valid.
+- Profile B S31 accepts and stores a newer authenticated settings snapshot while
+  time is invalid.
+- Profile B S31 refuses to execute calendar-derived policy until time and
+  settings freshness are valid.
+- Profile B S31 reports calculated current policy, next transition,
+  `settings_generation`, and calendar-engine version.
+- Profile B CoreInk surfaces disagreement between S31 reports.
 - S31 rejects lower `schedule_generation`.
+- Profile B S31 rejects lower `settings_generation`.
 - S31 rejects same `schedule_generation` with different payload.
+- Profile B S31 rejects same `settings_generation` with different payload.
 - S31 rejects wrong `controller_epoch`.
 - S31 survives CoreInk reboot while schedule remains valid.
 - S31 enters fail-safe after `valid_until_utc`.
@@ -208,3 +280,6 @@ Before release, run these tests on real hardware:
 - Flash write failure during schedule storage returns an explicit rejection and
   preserves the previous valid schedule if possible.
 - Flash write failure with no previous valid schedule enters fail-safe.
+- Profile B flash write failure during settings storage returns an explicit
+  rejection and preserves the previous valid settings if possible.
+- Profile B flash write failure with no previous valid settings enters fail-safe.

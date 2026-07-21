@@ -25,6 +25,7 @@ Ship defaults stay in YAML so devices boot ready. Users can change mode and valu
 | Plag helper | **Dated**: `getPlagTime(ESPTime date)` (not today-only) |
 | Early Shabbos API | Explicit `honor_early_shabbos` on boundary helper (callers choose) |
 | Build validation | Compile ≥1 ESP8266 target and ≥1 ESP32 target before merge |
+| Distributed CoreInk/S31 profile | Same boundary helper must run consistently on S31 and CoreInk reference builds |
 
 ### Early Shabbos (documented intentional)
 
@@ -218,6 +219,32 @@ Consumers (all required to use this helper):
 | `random_minute_generator` | START/END window; START with `honor_early_shabbos=true` |
 
 Also fix plugin wiring so substitutions/globals match the main package (replace undefined `deg_shabbos_start_global` / `${deg_shabbos_start}` usage with the helper, not parallel degree-only paths).
+
+---
+
+## CoreInk/S31 distributed-profile requirement
+
+The maintainer-first CoreInk architecture keeps the full Melacha Plug brain on
+each S31 and uses CoreInk as the house clock, settings console, and status
+display. That makes this zmanim refactor more important, not less.
+
+Requirements:
+
+- The boundary helper must compile and behave the same on ESP8266 S31 firmware
+  and any ESP32/CoreInk reference build.
+- Every setting needed by the helper must be serializable into a complete
+  settings snapshot: timezone/DST, latitude, longitude, Eretz Yisrael mode,
+  normal/inverse mode, Early Shabbos policy, Degree/Minutes mode, offsets, and
+  havdalah method.
+- S31 must report `calendar_engine_version`, `settings_generation`, calculated
+  current policy, next transition, and a compact calculation fingerprint.
+- CoreInk may compare S31 reports against its own reference calculation or
+  against other S31 reports.
+- A disagreement is a visible diagnostic and possible fail-safe trigger; it is
+  not an automatic toggle.
+
+This avoids two independent zmanim implementations. The same tested helper is
+used wherever calculation occurs.
 
 ---
 

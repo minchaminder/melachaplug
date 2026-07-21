@@ -81,9 +81,103 @@ The S31 owns:
 - Reporting whether the button is locked.
 - Entering fail-safe behavior when time, schedule, or communication is invalid.
 
-The S31 contains no Jewish calendar or zmanim calculations in the new design. It
-does not independently decide when Shabbos begins. CoreInk decides what should
-happen; S31 safely applies it.
+In the CoreInk-authoritative schedule profile, the S31 contains no Jewish
+calendar or zmanim calculations. It does not independently decide when Shabbos
+begins. CoreInk decides what should happen; S31 safely applies it.
+
+## Architecture Profiles
+
+The plan now tracks two viable control profiles. They share the same hardware,
+identity, authentication, time-validation, fail-safe, and boot-safety rules.
+
+### Profile A: CoreInk-Authoritative Schedule
+
+This is the detailed architecture in the original CoreInk/S31 plan.
+
+CoreInk:
+
+- Owns Hebrew calendar and zmanim calculation.
+- Generates complete rolling schedules.
+- Sends desired relay/button/LED policy to each S31.
+- Compares desired state with S31 reported output state.
+
+S31:
+
+- Applies CoreInk-provided schedules.
+- Caches transitions.
+- Executes cached transitions while time and schedule remain valid.
+- Does not contain calendar/zmanim decision logic.
+
+Profile A gives one central schedule authority and smaller S31 decision logic.
+The cost is that porting the full calendar engine to CoreInk becomes required
+before the architecture is complete.
+
+### Profile B: S31-Local Brain
+
+This is the maintainer-first alternative and may be lower risk for an initial
+version because it keeps the existing Melacha Plug brain on every S31.
+
+CoreInk:
+
+- Maintains and distributes trusted time.
+- Sends location, timezone, daylight-saving, mode, zmanim, fail-safe, and
+  button-lock settings.
+- Owns the setup UI and local status display.
+- Tracks firmware versions and settings generations.
+- Receives each S31's calculated current policy and next transition.
+- Displays disagreements between plugs or between CoreInk's reference
+  calculation and S31 reports.
+
+S31:
+
+- Keeps the full Hebrew calendar and zmanim engine.
+- Calculates its own protected periods and relay schedule.
+- Applies relay, button, and LED policy locally.
+- Reports its calculated current state, next transition, reason, settings
+  generation, and calendar-engine version.
+- Continues independently after CoreInk disappears, as long as its time,
+  settings, and uncertainty window remain valid.
+
+Profile B gives better redundancy after initialization: if CoreInk later loses
+power or reboots, each powered S31 can keep running from its own local calendar
+logic. It also reuses code that already exists on the S31.
+
+The tradeoff is stronger firmware-version coupling. Every S31 must carry the
+same tested calendar engine and must receive the same settings generation.
+CoreInk needs explicit disagreement detection because a calculation bug or
+version mismatch can make one plug diverge from another.
+
+Recommended Profile B startup flow:
+
+1. S31 boots relay `OFF` and button locked.
+2. S31 receives authenticated time and full settings from CoreInk.
+3. S31 validates and stores the settings snapshot.
+4. S31 calculates its own current policy and rolling local schedule.
+5. S31 reports the calculated current policy and next transition to CoreInk.
+6. CoreInk compares reports and displays disagreements.
+7. Once initialized, S31 continues independently while time/settings remain
+   valid.
+8. CoreInk periodically corrects time and pushes newer settings generations.
+
+Profile B still needs the same hard rules:
+
+- Full settings snapshots replace older settings. Do not patch settings.
+- `settings_generation` is monotonic within `controller_epoch`.
+- Time updates and settings snapshots are authenticated.
+- Commands are idempotent set-state or set-settings operations.
+- Any uncertainty enters the configured fail-safe state.
+- S31 must not execute calendar-derived relay policy unless its time and
+  settings are valid.
+
+### Profile Selection Guidance
+
+For a first shippable prototype, Profile B is probably the lower-risk path if
+the existing S31 calendar/zmanim code is already trusted and fits comfortably in
+flash with the required communication layer.
+
+Profile A remains the cleaner centralized-controller architecture if the product
+goal is to move calendar authority out of every relay plug. It should stay in
+the docs because it is still a defensible later refactor.
 
 ## Onboard RTC
 
@@ -228,7 +322,9 @@ The first supported product profile is narrower:
 - One CoreInk.
 - One to four S31 satellites.
 - CoreInk onboard RTC only; no external RTC module.
-- CoreInk-owned SoftAP only.
+- CoreInk-owned SoftAP/HTTP as the baseline transport.
+- ESP-NOW as an alternative S31 control transport only after pairing, channel,
+  ACK/retry, payload-size, and RF tests pass.
 - HTTP/JSON protocol.
 - Manual time setup plus optional trusted NTP.
 - Fixed selectable fail-safe choices.
@@ -308,7 +404,9 @@ The product should record:
 
 ## Calendar And Zmanim Engine
 
-The existing Melacha Plug calendar code can mostly move to CoreInk unchanged.
+Profile A moves the existing Melacha Plug calendar code to CoreInk.
+Profile B keeps that code on every S31 and may also run it on CoreInk as a
+reference calculation for disagreement detection.
 
 That includes:
 
@@ -327,9 +425,10 @@ That includes:
 - Overrides.
 - Adjacent Shabbos and Yom Tov handling.
 
-The required refactor is that the calendar engine must stop directly touching
-local S31 GPIO. Today, some logic directly manipulates relay state, button
-enable/lock, and protected-mode LED. That should become a generic policy result:
+The required refactor for both profiles is that the calendar engine must stop
+directly touching GPIO. Today, some logic directly manipulates relay state,
+button enable/lock, and protected-mode LED. That should become a generic policy
+result:
 
 ```text
 desired_relay_state
@@ -343,7 +442,9 @@ effective_until
 The same calendar engine can then target:
 
 - A local relay for legacy standalone builds.
-- A remote S31 satellite for the CoreInk build.
+- A remote S31 satellite for Profile A CoreInk-authoritative builds.
+- A local S31 relay for Profile B S31-local-brain builds.
+- A CoreInk reference calculation for Profile B diagnostics.
 
 The output of the calendar engine is policy, not GPIO.
 
@@ -578,6 +679,56 @@ If AP+STA mode is used, the ESP32 SoftAP can follow the external router channel.
 The cached S31 schedule should survive brief reconnects, but channel migration
 must still be fault-tested.
 
+### ESP-NOW Transport Alternative
+
+ESP-NOW is a viable alternative transport for CoreInk-to-S31 control messages.
+It is connectionless Wi-Fi peer-to-peer messaging between Espressif devices, so
+the S31 control link does not need an access point, DHCP, IP addresses, DNS, or
+HTTP.
+
+ESP-NOW is not automatically mesh. It does not by itself provide forwarding,
+routing, or repeater behavior. If a far S31 cannot hear CoreInk directly, the
+product must either move the CoreInk, add a real repeater/forwarding protocol,
+or use a distinct mesh framework. Do not describe ESP-NOW as mesh unless that
+forwarding layer has actually been implemented and tested.
+
+Recommended use:
+
+- Keep CoreInk SoftAP/HTTP for phone setup and firmware upload.
+- Allow ESP-NOW as the S31 control transport for time, settings, ACK, and status
+  messages.
+- Keep SoftAP/HTTP as the simpler baseline transport until ESP-NOW reliability,
+  pairing, channel behavior, and diagnostics are tested.
+
+ESP-NOW implementation constraints:
+
+- Pair by MAC address plus `controller_id`, `controller_epoch`, and protocol
+  secret.
+- Use application-level HMAC, sequence numbers, ACKs, retries, and duplicate
+  suppression. MAC-layer send success is not enough to prove the application
+  processed the message.
+- Assume small payloads for S31 compatibility unless measured otherwise. The
+  safest ESP8266-compatible design keeps packets at or below 250 bytes, or uses
+  explicit fragmentation.
+- Do not send large JSON schedules over ESP-NOW unless fragmentation,
+  reassembly, timeout, and flash atomicity are specified.
+- Prefer compact CBOR/TLV/binary frames for ESP-NOW. HTTP/JSON remains easier
+  for debugging and first bring-up.
+- Broadcast discovery must not carry secrets. Encrypted unicast or an
+  application HMAC is required for trusted time/settings.
+- All devices must share a radio channel. If CoreInk also runs SoftAP or AP+STA,
+  channel changes must be tested because ESP-NOW peers must transmit on the
+  active channel.
+- ESP-NOW range must be tested in the real mounted location; it removes IP
+  networking but does not remove RF physics.
+
+Profile fit:
+
+- Profile A over ESP-NOW is possible, but full schedule packets may be too large
+  unless compressed or fragmented.
+- Profile B over ESP-NOW is a cleaner fit because CoreInk sends compact time and
+  settings updates, while each S31 calculates its own schedule locally.
+
 ## Local Time Server
 
 The S31 does not have a battery-backed RTC. After an S31 reboot or power outage,
@@ -598,18 +749,20 @@ Startup flow:
 5. CoreInk starts local time service.
 6. S31 connects.
 7. S31 obtains valid time.
-8. CoreInk sends the current schedule.
-9. S31 applies the current desired state.
-10. S31 confirms the result.
+8. Profile A: CoreInk sends the current schedule.
+9. Profile B: CoreInk sends the current settings snapshot and S31 calculates
+   policy locally.
+10. S31 applies the current desired state.
+11. S31 confirms the result or reports calculated policy.
 
 An S31 that has not obtained valid time stays in its configured fail-safe state.
 
-## CoreInk To S31 Contract
+## Profile A CoreInk To S31 Schedule Contract
 
 The detailed packet rules belong in `COREINK_S31_PROTOCOL.md`.
 
-CoreInk must not merely say "turn on now." It sends an authoritative rolling
-schedule that the S31 can survive on.
+In Profile A, CoreInk must not merely say "turn on now." It sends an
+authoritative rolling schedule that the S31 can survive on.
 
 Protocol rules:
 
@@ -651,9 +804,35 @@ The no-broker design avoids MQTT and another failure point. For the hardened
 version, use a small custom protocol rather than depending heavily on ESPHome's
 generic entity REST identifiers.
 
+## Profile B CoreInk To S31 Settings Contract
+
+In Profile B, CoreInk sends time and full settings snapshots instead of rolling
+schedules. Each S31 calculates its own schedule locally.
+
+Profile B rules:
+
+- Never patch settings. Send a full replacement settings snapshot.
+- `settings_generation` only increases within the current `controller_epoch`.
+- A lower `settings_generation` is rejected as stale.
+- The same `settings_generation` with the same CRC/HMAC is accepted as a
+  duplicate.
+- The same `settings_generation` with different contents is rejected.
+- S31 may store authenticated settings while time is invalid, but must not apply
+  calendar-derived relay policy until time and settings freshness are valid.
+- S31 reports calculated current policy, next transition, reason,
+  `settings_generation`, `calendar_engine_version`, and calculation fingerprint.
+- CoreInk displays disagreement between S31 reports instead of silently choosing
+  one plug as correct.
+- CoreInk can re-push settings, request a detailed calculation report, or require
+  service if disagreement persists.
+
+Profile B is the natural fit for ESP-NOW because time/settings/status frames can
+be much smaller than complete rolling schedules.
+
 ## Acknowledgements And Reporting
 
-The S31 must distinguish receiving a packet from actually applying it.
+The S31 must distinguish receiving controller data from actually applying relay
+policy.
 
 Useful acknowledgements include:
 
@@ -662,7 +841,11 @@ boot_id
 device_id
 controller_id
 accepted_schedule_generation
+accepted_settings_generation
 cached_schedule_generation
+cached_settings_generation
+calendar_engine_version
+calculation_fingerprint
 valid_until_utc
 time_valid
 time_source
@@ -670,6 +853,7 @@ current_utc
 last_transition_id
 last_transition_result
 next_transition_id
+next_transition_reason
 requested_relay_state
 relay_output_state
 physical_button_locked
@@ -713,7 +897,7 @@ S31 hardware requirements for the Sonoff S31 profile:
 The GPIO13 green LED is the protected-mode indicator. The LED associated with
 GPIO12 follows the relay and is not an independent status indicator.
 
-## Cached Schedule Behavior
+## Profile A Cached Schedule Behavior
 
 Each S31 stores a rolling future schedule.
 
@@ -758,15 +942,55 @@ The cached schedule protects against temporary loss of CoreInk or Wi-Fi. It does
 not solve a complete S31 power loss by itself, because after reboot the S31 has
 no valid clock. It must first obtain time from CoreInk.
 
+## Profile B Cached Settings Behavior
+
+Each S31 stores the newest accepted settings snapshot and uses it to calculate
+policy locally.
+
+Each cached settings snapshot includes:
+
+- Timezone and daylight-saving behavior.
+- Latitude and longitude.
+- Eretz Yisrael or diaspora mode.
+- Normal or inverse mode.
+- Early Shabbos policy.
+- Zmanim mode and values.
+- Candle-lighting and havdalah settings.
+- Per-plug relay behavior.
+- Button-lock behavior.
+- Fail-safe policy.
+- Clock-uncertainty policy.
+- `controller_epoch`.
+- `settings_generation`.
+- Creation time.
+- Refresh deadline.
+- Hard expiry time.
+- CRC/HMAC.
+- Calendar-engine compatibility requirement.
+
+The cached settings snapshot protects against temporary loss of CoreInk or
+Wi-Fi. It also allows S31 to keep functioning after CoreInk disappears, as long
+as S31 remains powered, its software clock remains within the configured
+uncertainty window, and the settings snapshot has not expired.
+
+It does not solve a complete S31 power loss by itself. After reboot, S31 has no
+valid clock and must obtain authenticated time before applying calendar-derived
+policy.
+
 ## Failure Behavior
 
-These states are non-negotiable.
+These states are non-negotiable. Profile A uses downloaded schedules. Profile B
+uses downloaded settings plus S31-local calendar calculation.
 
 ### CoreInk Online, Time Valid, S31 Online
 
-CoreInk is authoritative. The S31 obtains time, accepts the newest schedule,
-applies the current policy, caches future transitions, reports its state, and
-executes future transitions locally.
+Profile A: CoreInk is schedule-authoritative. The S31 obtains time, accepts the
+newest schedule, applies the current policy, caches future transitions, reports
+its state, and executes future transitions locally.
+
+Profile B: CoreInk is time/settings-authoritative. The S31 obtains time, accepts
+the newest settings snapshot, calculates policy locally, applies its calculated
+current policy, and reports the calculation back to CoreInk.
 
 ### CoreInk Offline, S31 Powered, S31 Time Valid, Schedule Valid
 
@@ -774,9 +998,16 @@ The S31 continues executing the cached schedule. This covers Wi-Fi interruption,
 CoreInk reboot, temporary CoreInk firmware failure, or CoreInk USB removal while
 the S31 still has AC power.
 
+Profile B equivalent: the S31 continues calculating and executing its local
+calendar policy while its time, settings snapshot, and uncertainty window remain
+valid.
+
 ### CoreInk Offline And Cached Schedule Expires
 
 The S31 enters the configured fail-safe state.
+
+Profile B equivalent: if the settings snapshot expires or S31 clock uncertainty
+exceeds policy, the S31 enters the configured fail-safe state.
 
 Recommended default:
 
@@ -788,8 +1019,12 @@ Recommended default:
 ### S31 Reboots And Has No Valid Time
 
 The S31 cannot safely use absolute UTC timestamps. It immediately enters the
-configured fail-safe Shabbos state until it receives valid time, receives a
-valid schedule, and applies the current authoritative policy.
+configured fail-safe Shabbos state until it receives valid time and either:
+
+- Profile A: receives a valid schedule and applies the current authoritative
+  policy.
+- Profile B: has valid settings, calculates current policy locally, and applies
+  that calculated policy.
 
 The application-level relay boot default should be configured to the fail-safe
 state so there is no unsafe temporary state after firmware GPIO initialization
@@ -809,16 +1044,29 @@ restoration; this matters for inverse mode.
 
 ### CoreInk Time Becomes Invalid
 
-CoreInk stops generating new calendar-derived transitions, does not send
-speculative schedules, shows a prominent clock fault, exposes the fault in the
-web GUI, allows manual correction, and reports `TIME_INVALID` to S31s.
+CoreInk shows a prominent clock fault, exposes the fault in the web GUI, allows
+manual correction, and reports `TIME_INVALID` to S31s.
 
-Each S31 continues a still-valid previously accepted schedule and enters
-fail-safe when that schedule expires.
+Profile A: CoreInk stops generating new calendar-derived transitions and does
+not send speculative schedules.
+
+Profile B: CoreInk stops sending trusted time updates or new settings snapshots
+that depend on the invalid clock.
+
+Profile A: each S31 continues a still-valid previously accepted schedule and
+enters fail-safe when that schedule expires.
+
+Profile B: each S31 continues using still-valid previously accepted settings and
+its own valid local time estimate. It enters fail-safe when settings expire or
+its local time uncertainty exceeds policy.
 
 ### Corrupted Or Stale Schedule
 
 The S31 rejects it and keeps the newest previously validated schedule.
+
+Profile B equivalent: corrupted, unauthenticated, stale, or conflicting settings
+snapshots are rejected, and the newest previously validated settings remain
+active until they expire.
 
 ### CoreInk Returns After Outage
 
@@ -828,15 +1076,29 @@ The S31 reports boot ID, time validity, current relay output,
 CoreInk then confirms the existing schedule or replaces it with a newer
 `schedule_generation`.
 
+Profile B equivalent: S31 reports boot ID, time validity, current relay output,
+`cached_settings_generation`, calendar-engine version, calculated current policy,
+next transition, and last controller seen. CoreInk then confirms the settings
+generation, replaces it with a newer one, or surfaces disagreement.
+
 ### Settings Change
 
-Any change affecting zmanim or behavior causes CoreInk to:
+In Profile A, any change affecting zmanim or behavior causes CoreInk to:
 
 1. Increment `schedule_generation`.
 2. Recalculate the entire rolling schedule.
 3. Replace the old schedule on every S31.
 4. Wait for acceptance acknowledgements.
 5. Show which plugs are confirmed.
+
+In Profile B, the same kind of change causes CoreInk to:
+
+1. Increment `settings_generation`.
+2. Serialize a complete replacement settings snapshot.
+3. Replace the old settings on every S31.
+4. Wait for settings acknowledgements.
+5. Wait for calculated policy reports.
+6. Show confirmed plugs and any calculation disagreements.
 
 ## Normal And Inverse Modes
 

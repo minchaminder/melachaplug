@@ -1,8 +1,14 @@
 # CoreInk/S31 JSON Schemas And Invariants
 
-This document defines the V1 HTTP/JSON payload contract. Protocol behavior is
-specified in `COREINK_S31_PROTOCOL.md`; state behavior is specified in
+This document defines the V1 payload contracts. Protocol behavior is specified
+in `COREINK_S31_PROTOCOL.md`; state behavior is specified in
 `COREINK_S31_STATE_MACHINES.md`.
+
+Profile A uses CoreInk-generated schedule packets. Profile B uses
+CoreInk-generated settings snapshots and S31-generated policy reports. HTTP/JSON
+is the baseline transport. ESP-NOW may use compact binary/CBOR framing, but the
+same semantic fields, authentication rules, generation rules, and invariants
+apply.
 
 ## Encoding Rules
 
@@ -62,11 +68,14 @@ boot_id: 22 char base64url, 128 random bits, no padding
 | `device_id`, `s31_id`, `target_device_id` | string | 1 to 64 chars |
 | `boot_id` | string | 22 char base64url random id |
 | `schedule_generation` | integer | unsigned 64-bit |
+| `settings_generation` | integer | unsigned 64-bit |
 | `utc` fields | integer | unsigned Unix epoch seconds |
 | relay state | string | `ON` or `OFF` |
 | booleans | boolean | JSON `true` or `false` |
 
 ## Schedule Packet
+
+Profile A only.
 
 Endpoint:
 
@@ -137,6 +146,105 @@ Transition object:
 | `protected_led` | boolean | required |
 | `led_pattern` | string | max 32 chars |
 
+## Settings Snapshot
+
+Profile B only. The snapshot is a full replacement for prior settings, never a
+patch.
+
+Endpoint for HTTP baseline:
+
+```text
+POST http://{s31_ip}/api/v1/settings
+```
+
+ESP-NOW may carry the same semantic payload in compact frames or chunks.
+
+Required fields:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `protocol_version` | integer | shared type |
+| `controller_id` | string | paired controller |
+| `controller_epoch` | string | paired epoch |
+| `target_device_id` | string | receiving S31 |
+| `settings_generation` | integer | monotonic within epoch |
+| `settings_id` | string | stable id for logs/UI |
+| `created_at_utc` | integer | CoreInk settings creation time |
+| `valid_from_utc` | integer | first valid use time |
+| `refresh_required_by_utc` | integer | refresh deadline |
+| `valid_until_utc` | integer | hard settings expiry |
+| `calendar_engine_min_version` | string | minimum compatible S31 engine |
+| `timezone_id` | string | max 64 chars |
+| `dst_rule_version` | string | max 64 chars |
+| `latitude_e7` | integer | latitude degrees * 10,000,000 |
+| `longitude_e7` | integer | longitude degrees * 10,000,000 |
+| `eretzyisrael_mode` | boolean | required |
+| `relay_mode` | string | `NORMAL`, `INVERSE` |
+| `early_shabbos_policy` | object | profile-specific fields |
+| `zmanim_policy` | object | degree/minutes settings |
+| `button_lock_policy` | object | button behavior |
+| `failsafe_policy` | object | same meaning as schedule fail-safe |
+| `clock_uncertainty_policy` | object | warning/max thresholds |
+| `crc32` | string | 8 lowercase hex |
+| `hmac` | string | 64 lowercase hex |
+
+`zmanim_policy` must be explicit enough for the S31 to calculate without hidden
+CoreInk defaults. It should include mode, degree values, minute values, candle
+lighting offset, havdalah method, and any product-level adjustments.
+
+Settings acceptance result values:
+
+```text
+READY_TO_CALCULATE
+STORED_PENDING_TIME
+REJECTED
+```
+
+`STORED_PENDING_TIME` means the settings snapshot passed identity, generation,
+CRC, HMAC, schema, and storage checks, but the S31 cannot yet establish
+freshness because local time is invalid.
+
+## Policy Report
+
+Profile B only. Sent by S31 after calculating from a valid settings snapshot.
+
+Endpoint for HTTP baseline:
+
+```text
+POST http://192.168.4.1/api/v1/policy_report
+```
+
+Required fields:
+
+| Field | Type | Values |
+| --- | --- | --- |
+| `protocol_version` | integer | shared type |
+| `controller_id` | string | paired controller |
+| `controller_epoch` | string | paired epoch |
+| `s31_id` | string | reporting S31 |
+| `boot_id` | string | current boot |
+| `settings_generation` | integer | active settings |
+| `calendar_engine_version` | string | max 64 chars |
+| `calculation_fingerprint` | string | max 64 chars |
+| `time_valid` | boolean | required |
+| `time_uncertainty_seconds` | integer | S31 estimate |
+| `current_policy` | object | desired relay/button/LED now |
+| `next_transition` | object or null | null only if none in supported horizon |
+| `failsafe_active` | boolean | required |
+| `failsafe_reason` | string or null | max 64 chars |
+| `hmac` | string | 64 lowercase hex |
+
+`next_transition`:
+
+| Field | Type | Values |
+| --- | --- | --- |
+| `transition_id` | string | max 64 chars |
+| `at_utc` | integer | next transition time |
+| `desired_relay_state` | string | `ON`, `OFF` |
+| `physical_button_locked` | boolean | required |
+| `protected_led` | boolean | required |
+| `reason` | string | max 32 chars |
+
 ## Registration
 
 Endpoint:
@@ -158,6 +266,8 @@ Required fields:
 | `ip_address` | string | S31 current address as observed/configured |
 | `time_valid` | boolean | S31 time validity |
 | `cached_schedule_generation` | integer or null | null if no schedule |
+| `cached_settings_generation` | integer or null | null if no settings/Profile A |
+| `calendar_engine_version` | string or null | null for Profile A-only firmware |
 | `hmac` | string | 64 lowercase hex |
 
 ## Time Request And Response
@@ -197,7 +307,7 @@ Response fields:
 
 S31 must not treat unauthenticated time as sufficient for relay execution.
 
-## Schedule ACK
+## Acceptance ACK
 
 Endpoint:
 
@@ -214,14 +324,15 @@ Required fields:
 | `controller_epoch` | string | paired epoch |
 | `s31_id` | string | sending S31 |
 | `boot_id` | string | current boot |
-| `ack_type` | string | `SCHEDULE` |
+| `ack_type` | string | `SCHEDULE`, `SETTINGS` |
 | `accepted` | boolean | required |
-| `schedule_generation` | integer | schedule being ACKed |
+| `schedule_generation` | integer or null | schedule being ACKed, null for settings ACK |
+| `settings_generation` | integer or null | settings being ACKed, null for schedule ACK |
 | `accepted_at_utc` | integer or null | null if S31 time invalid |
 | `accepted_at_uptime_ms` | integer | required |
-| `cached_transition_count` | integer | 0 to 16 |
+| `cached_transition_count` | integer or null | 0 to 16 for schedule ACK, null for settings ACK |
 | `time_valid` | boolean | required |
-| `execution_state` | string | `READY_TO_EXECUTE`, `STORED_PENDING_TIME`, `REJECTED` |
+| `execution_state` | string | `READY_TO_EXECUTE`, `READY_TO_CALCULATE`, `STORED_PENDING_TIME`, `REJECTED` |
 | `reject_reason` | string or null | null when accepted |
 | `hmac` | string | 64 lowercase hex |
 
@@ -280,8 +391,12 @@ Required fields in a status body:
 | `last_time_sync_utc` | integer or null | null if never valid |
 | `last_controller_seen_utc` | integer or null | null if S31 time invalid |
 | `cached_schedule_generation` | integer or null | null if no schedule |
+| `cached_settings_generation` | integer or null | null if no settings/Profile A |
+| `calendar_engine_version` | string or null | null for Profile A-only firmware |
 | `schedule_valid` | boolean | required |
+| `settings_valid` | boolean or null | required for Profile B, null for Profile A |
 | `schedule_valid_until_utc` | integer or null | null if no valid schedule |
+| `settings_valid_until_utc` | integer or null | null if no valid settings |
 | `transition_horizon_until_utc` | integer or null | null if no valid schedule |
 | `requested_relay_state` | string | `ON`, `OFF` |
 | `relay_output_state` | string | `ON`, `OFF` |
@@ -319,14 +434,19 @@ Both CoreInk and S31 test suites must enforce these invariants:
 | No toggle | All relay commands are absolute set-state policies. |
 | Epoch match | S31 rejects unexpected `controller_id` or `controller_epoch`. |
 | Generation monotonicity | Lower `schedule_generation` is stale; same generation with different payload is rejected. |
+| Settings monotonicity | Lower `settings_generation` is stale; same generation with different settings payload is rejected. |
 | Duplicate idempotence | Same generation and same CRC/HMAC may be accepted repeatedly with no behavior change. |
 | Invalid S31 time | S31 may store authenticated schedules as `STORED_PENDING_TIME`, but may not execute them. |
+| Invalid S31 time, Profile B | S31 may store authenticated settings as `STORED_PENDING_TIME`, but may not apply calendar-derived relay policy. |
+| Full replacement | Schedule packets and settings snapshots replace prior accepted data completely; partial patching is not allowed. |
 | Current policy expiry | `current_policy` is not authoritative after `valid_until_utc`. |
 | Missed transitions | After reconnect/time recovery, S31 applies the latest effective policy at current UTC, not every missed transition. |
+| Local calendar report | Profile B S31 reports active `settings_generation`, calendar-engine version, current policy, next transition, and calculation fingerprint. |
+| Disagreement visibility | Profile B CoreInk surfaces disagreeing S31 reports; it does not silently choose one result as authoritative. |
 | Boot fail-safe | Before S31 application firmware, relay expectation is hardware-safe `OFF`; after app GPIO initialization, relay/button/LED enter configured fail-safe before network or schedule logic. |
 | Button lock | Short press cannot toggle until firmware explicitly allows it. |
 | HMAC | Product firmware rejects unsigned or bad-HMAC payloads. |
 | Canonicalization | Signatures are computed over canonical JSON bytes only. |
 | Parser limits | Oversized bodies, excessive depth, duplicate keys, and too many transitions are rejected. |
-| Storage failure | Failed schedule storage preserves previous valid schedule if possible; otherwise fail-safe. |
+| Storage failure | Failed schedule/settings storage preserves previous valid schedule/settings if possible; otherwise fail-safe. |
 | Relay proof | Firmware may report relay output confirmed, not mechanical contact verified. |

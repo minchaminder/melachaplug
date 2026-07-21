@@ -7,19 +7,27 @@ The product-level appliance plan lives in `COREINK_OFFLINE_PRODUCT_PLAN.md`.
 Device state machines live in `COREINK_S31_STATE_MACHINES.md`.
 Exact JSON schemas and invariants live in `COREINK_S31_JSON_SCHEMAS.md`.
 
-The CoreInk is the brain. It owns clock validation, RTC holdover, Hebrew
-calendar calculation, zmanim, settings, user interface, and the authoritative
-desired relay state.
+The protocol supports two architecture profiles:
 
-The S31 is the satellite. It owns the physical relay, physical button lockout,
-relay-output reporting, cached schedule execution, and configured fail-safe
-behavior when the controller or time source disappears.
+- Profile A: CoreInk-authoritative schedule. CoreInk owns clock validation,
+  Hebrew calendar calculation, zmanim, settings, user interface, and the
+  authoritative desired relay state. S31 applies and caches CoreInk-generated
+  schedules.
+- Profile B: S31-local brain. CoreInk owns trusted time, setup, settings
+  distribution, and status display. Each S31 keeps the full calendar/zmanim
+  engine, calculates its own policy, and reports its calculated state back to
+  CoreInk.
+
+Profile A remains the centralized-controller target. Profile B is the
+maintainer-first alternative that may be lower risk for a first version because
+it reuses the existing S31 calendar engine.
 
 ## Locked Rules
 
-- Schedule packets fully replace older schedules. They are never patched.
-- `schedule_generation` only increases within a `controller_epoch` and survives
-  CoreInk reboots.
+- Schedule packets or settings snapshots fully replace older data. They are
+  never patched.
+- `schedule_generation` or `settings_generation` only increases within a
+  `controller_epoch` and survives CoreInk reboots.
 - All relay instructions are idempotent `set state` operations. Never use
   `toggle`.
 - S31 acknowledges schedule acceptance separately from actual relay
@@ -27,8 +35,8 @@ behavior when the controller or time source disappears.
 - CRC is mandatory for corruption detection.
 - HMAC with a pre-shared key is mandatory for product firmware. It may be
   disabled only in explicit lab/debug builds.
-- S31 executes cached transitions only while both its time and schedule are
-  valid.
+- S31 executes cached transitions or locally calculated calendar policy only
+  while its time and schedule/settings are valid.
 - Any uncertainty falls into an explicitly configured fail-safe state.
 - Public or local NTP is optional convenience only. Fully offline operation must
   not depend on WAN internet, a router, DNS, mDNS, or a home LAN.
@@ -40,33 +48,59 @@ behavior when the controller or time source disappears.
 
 ### CoreInk Controller
 
-Responsibilities:
+Shared responsibilities:
 
 - Maintain the authoritative clock state.
 - Validate onboard RTC time before using it.
 - Accept manual time correction through the local UI.
 - Use public or local NTP only when available and trusted.
 - Serve as the local time source for S31 devices.
-- Provide the private Wi-Fi control link when no home LAN exists.
+- Provide the private control link when no home LAN exists.
+- Persist `controller_epoch` and generation counters across reboot.
+- Track S31 acknowledgements, relay output state reports, firmware versions, and
+  fail-safe reasons.
+
+Profile A responsibilities:
+
 - Compute Hebrew calendar state and zmanim.
 - Produce complete schedule packets for each S31.
-- Persist `controller_epoch` and `schedule_generation` across reboot.
-- Track S31 schedule acknowledgements and relay output state reports.
 - Stop issuing authoritative schedules when its own time is invalid.
+
+Profile B responsibilities:
+
+- Produce complete settings snapshots for each S31.
+- Distribute authenticated time updates.
+- Optionally run the same calendar engine as a reference calculation.
+- Compare S31-reported calculated policy and next transition.
+- Display disagreement if S31 devices diverge from each other or from CoreInk's
+  reference calculation.
 
 ### S31 Satellite
 
-Responsibilities:
+Shared responsibilities:
 
-- Apply relay state from an accepted schedule.
-- Lock or unlock the physical button from an accepted schedule.
-- Cache the complete currently accepted schedule.
-- Reject stale, corrupt, unauthenticated, or invalid schedules.
-- Execute cached transitions only while local time is valid.
+- Apply relay state from accepted policy.
+- Lock or unlock the physical button from accepted policy.
+- Reject stale, corrupt, unauthenticated, or invalid controller data.
+- Execute relay policy only while local time is valid.
 - Report relay output state, button lock state, current
-  `schedule_generation`, boot id, time validity, and fail-safe reason.
+  generation, boot id, time validity, and fail-safe reason.
 - Enter the configured fail-safe state when command, schedule, or time
   certainty is lost.
+
+Profile A responsibilities:
+
+- Cache the complete currently accepted schedule.
+- Execute cached schedule transitions while local time and schedule validity
+  remain acceptable.
+
+Profile B responsibilities:
+
+- Cache the complete currently accepted settings snapshot.
+- Run the full Hebrew calendar and zmanim engine locally.
+- Calculate current policy and upcoming transitions on-device.
+- Report the calculated current policy, next transition, reason,
+  `settings_generation`, and calendar-engine version to CoreInk.
 
 ## Selected Hardware
 
@@ -197,8 +231,10 @@ the full architecture:
 - One CoreInk controller.
 - One to four S31 satellites.
 - CoreInk onboard BM8563 RTC only; no external RTC module.
-- CoreInk-owned SoftAP only.
-- HTTP with canonical JSON payloads.
+- CoreInk-owned SoftAP/HTTP baseline.
+- ESP-NOW alternative for S31 control only after pairing, channel, ACK/retry,
+  payload-size, and RF tests pass.
+- HTTP with canonical JSON payloads for baseline implementation.
 - Manual time setup plus optional trusted NTP.
 - Fixed, selectable fail-safe policies.
 - No cloud features.
@@ -225,7 +261,7 @@ and protocol key.
 random data and encoded as a fixed-length base64url or hex string. It must not
 be derived from a timestamp, MAC address, counter, or short random suffix.
 
-Schedules use:
+Profile A schedules use:
 
 ```text
 schedule_generation
@@ -236,17 +272,28 @@ Use an unsigned 64-bit integer for product firmware. If it ever reaches its
 maximum value, CoreInk must refuse to generate more schedules until a service
 flow creates a new `controller_epoch` and re-pairs the S31 devices.
 
+Profile B settings snapshots use:
+
+```text
+settings_generation
+```
+
+`settings_generation` follows the same rules: monotonic only within
+`controller_epoch`, persisted by CoreInk, rejected when lower than the cached
+value, accepted idempotently when the same signed payload is received again, and
+rejected if the same generation arrives with different contents.
+
 Factory reset and replacement rules:
 
 - If CoreInk flash is erased without a backup restore, it creates a new
   `controller_epoch` and key. Existing S31s reject it until re-paired.
 - If CoreInk is restored from a valid backup, it may keep the previous
-  `controller_epoch`, key, and last `schedule_generation`.
+  `controller_epoch`, key, and last generation counters.
 - A replacement CoreInk must use a service pairing flow that writes the new
   controller identity and key to each S31.
 - An S31 moved between packages must be factory-reset or re-paired. Re-pairing
-  wipes cached schedules, persisted `schedule_generation` state, and protocol
-  keys for the prior package.
+  wipes cached schedules/settings, persisted generation state, and protocol keys
+  for the prior package.
 - An S31 must reject schedules from an unexpected `controller_id` or
   `controller_epoch`.
 
@@ -291,14 +338,16 @@ source for a Shabbos/Yom Tov control window.
 
 ## Transport Pattern
 
-V1 uses direct HTTP over the CoreInk-owned Wi-Fi link. The selected product
-profile is push-first for schedules, after S31-initiated registration tells
-CoreInk which address currently belongs to each device ID.
+The baseline V1 transport uses direct HTTP over the CoreInk-owned Wi-Fi link.
+Profile A is push-first for schedules, after S31-initiated registration tells
+CoreInk which address currently belongs to each device ID. Profile B can use the
+same baseline for settings snapshots and policy reports.
 
 CoreInk to S31:
 
 ```text
 POST http://{s31_ip}/api/v1/schedule
+POST http://{s31_ip}/api/v1/settings
 GET  http://{s31_ip}/api/v1/status
 ```
 
@@ -309,19 +358,82 @@ POST http://192.168.4.1/api/v1/register
 POST http://192.168.4.1/api/v1/time
 POST http://192.168.4.1/api/v1/ack
 POST http://192.168.4.1/api/v1/status
+POST http://192.168.4.1/api/v1/policy_report
 ```
 
 ACKs may also be returned directly in the HTTP response to
 `POST /api/v1/schedule`, but durable state reporting must still be available
 after reconnect.
 
-CoreInk pushes a full schedule on boot, after S31 registration, after settings
-changes, after reconnection, and before cached schedules approach expiry. It
-also reconciles by polling or receiving status. Failed requests retry with
-bounded backoff.
+In Profile A, CoreInk pushes a full schedule on boot, after S31 registration,
+after settings changes, after reconnection, and before cached schedules approach
+expiry. In Profile B, CoreInk pushes authenticated time and full settings
+snapshots, then waits for S31 policy reports. It also reconciles by polling or
+receiving status. Failed requests retry with bounded backoff.
 
 An optional S31 pull endpoint can be added later as a recovery mechanism, but it
 is not required for the first offline appliance profile.
+
+## ESP-NOW Transport Alternative
+
+ESP-NOW may be used as an alternative transport for CoreInk/S31 control data.
+It changes the transport, not the safety rules. Authentication, generations,
+idempotent set-state behavior, stale rejection, ACKs, and fail-safe behavior
+remain mandatory.
+
+ESP-NOW properties that affect this protocol:
+
+- It is connectionless peer-to-peer Wi-Fi messaging. It does not need an access
+  point, DHCP, IP addressing, DNS, mDNS, or HTTP.
+- It is not a mesh protocol. It does not provide routing or forwarding by
+  itself. Any repeater behavior must be a separate application protocol or a
+  different mesh framework.
+- MAC-layer send success does not prove the receiving application accepted or
+  processed the message. Application-level ACKs, sequence numbers, retries, and
+  duplicate suppression are still required.
+- Devices must be on the correct Wi-Fi channel. If CoreInk also runs SoftAP or
+  AP+STA, channel behavior must be fixed and tested.
+- Encrypted unicast can be used with paired-device keys, but product firmware
+  must still keep application-level HMAC for authenticated time/settings/policy.
+- Broadcast discovery must not carry secrets or trusted control data.
+- Because S31 is ESP8266-class hardware, use a conservative 250-byte ESP-NOW
+  payload budget unless the exact firmware stack proves a larger interoperable
+  limit. Larger data needs explicit fragmentation and reassembly.
+
+Recommended ESP-NOW message classes:
+
+```text
+HELLO
+TIME_SYNC_REQUEST
+TIME_SYNC_RESPONSE
+SETTINGS_SNAPSHOT_CHUNK
+SETTINGS_ACK
+POLICY_REPORT
+STATUS_REPORT
+FAILSAFE_REPORT
+```
+
+Profile fit:
+
+- Profile A can run over ESP-NOW, but full rolling schedules are likely too
+  large for simple single-frame messages. Use HTTP/JSON first, or define
+  compact binary/CBOR framing plus fragmentation.
+- Profile B fits ESP-NOW better because CoreInk sends compact time/settings
+  updates and S31 calculates the schedule locally.
+
+ESP-NOW frame rules:
+
+- Every trusted frame includes `protocol_version`, `controller_id`,
+  `controller_epoch`, source device id, destination device id or broadcast class,
+  message type, monotonically increasing sequence number, and HMAC.
+- Frames are idempotent. Retransmission must not change relay state except by
+  reapplying the same desired policy or replacing settings with the same
+  generation.
+- Settings snapshots are still full replacements. If split into chunks, the S31
+  must not activate the new settings until all chunks pass authentication,
+  length, CRC, generation, and structure checks.
+- Time responses include a nonce from the request and are not trusted without a
+  valid HMAC.
 
 ## HTTP And Parser Limits
 
@@ -360,10 +472,10 @@ Allowed implementations:
   component or custom setter to update its local epoch.
 
 V1 should use an authenticated HTTP time endpoint if practical. If local SNTP is
-used, treat it only as rough local time; authenticated schedule validation still
-decides what may be executed. The protocol requirement is that S31 time can be
-restored from CoreInk without WAN internet and without trusting unauthenticated
-relay-control data.
+used, treat it only as rough local time; authenticated schedule/settings
+validation still decides what may be executed. The protocol requirement is that
+S31 time can be restored from CoreInk without WAN internet and without trusting
+unauthenticated relay-control data.
 
 S31 time is valid only when:
 
@@ -374,8 +486,9 @@ S31 time is valid only when:
 - The S31 has not rebooted into an unknown epoch since that sync.
 
 If S31 reboots and cannot restore valid time, cached UTC schedules are not safe
-to execute. It must enter fail-safe until time returns or the controller sends a
-fresh usable schedule after time has been restored.
+to execute, and local calendar calculations are not safe to apply. It must enter
+fail-safe until time returns and the cached schedule/settings are fresh enough to
+use.
 
 ## Canonical Payloads
 
@@ -407,6 +520,8 @@ canonical form as well, so logs, debug tools, and device calculations all see
 the same bytes.
 
 ## Schedule Packet
+
+Profile A uses schedule packets.
 
 The schedule packet is the authoritative state sent from CoreInk to S31. A new
 accepted packet fully replaces the prior accepted schedule.
@@ -489,6 +604,97 @@ Notes:
 - `failsafe_policy` is explicit in every schedule so the S31 can apply the
   correct fail-safe behavior even when CoreInk disappears.
 
+## Profile B Settings Snapshot
+
+Profile B uses settings snapshots instead of controller-generated schedules.
+CoreInk sends the complete configuration required for every S31 to calculate its
+own calendar policy.
+
+A new accepted settings snapshot fully replaces the prior accepted settings. Do
+not patch individual fields.
+
+Required settings snapshot content:
+
+```text
+protocol_version
+controller_id
+controller_epoch
+target_device_id
+settings_generation
+created_at_utc
+valid_from_utc
+refresh_required_by_utc
+valid_until_utc
+calendar_engine_min_version
+timezone_id
+dst_rule_or_tz_version
+latitude_e7
+longitude_e7
+eretzyisrael_mode
+normal_or_inverse_mode
+early_shabbos_policy
+candle_lighting_offset
+havdalah_method
+zmanim_mode
+degree_mode_values
+minutes_mode_values
+per_plug_behavior
+button_lock_policy
+failsafe_policy
+clock_uncertainty_policy
+crc32
+hmac
+```
+
+Profile B behavior:
+
+- S31 may store a newer authenticated settings snapshot while its local time is
+  invalid.
+- S31 must not execute calendar-derived relay policy until both time and
+  settings freshness are valid.
+- After accepting settings, S31 calculates its own current policy and upcoming
+  transitions.
+- S31 reports its calculated current policy, next transition, reason, and
+  calendar-engine version to CoreInk.
+- CoreInk displays disagreement if S31 reports differ from each other or from a
+  CoreInk reference calculation.
+- CoreInk updates settings by incrementing `settings_generation` and sending a
+  complete replacement snapshot.
+- CoreInk corrects time separately from settings, using authenticated time
+  responses.
+
+Profile B policy report fields:
+
+```text
+protocol_version
+controller_id
+controller_epoch
+s31_id
+boot_id
+settings_generation
+calendar_engine_version
+calculation_fingerprint
+time_valid
+time_uncertainty_seconds
+current_policy
+next_transition
+failsafe_active
+failsafe_reason
+hmac
+```
+
+`calculation_fingerprint` should be a compact digest over the inputs and
+computed boundary results, not over arbitrary logs. It exists so CoreInk can
+identify mismatched S31 calculations without needing to parse a large schedule.
+
+Profile B disagreement handling:
+
+- A disagreement is a visible diagnostic, not an automatic toggle.
+- CoreInk may push the latest settings snapshot again.
+- CoreInk may request a detailed calculation report from the disagreeing S31.
+- If the disagreement affects current protected-period state and cannot be
+  resolved, the affected S31 enters its configured fail-safe policy.
+
 ## Schedule Lifetime
 
 The S31 may store a long transition horizon without treating that whole horizon
@@ -534,13 +740,15 @@ cached execution.
 
 ## Acknowledgements
 
-Schedule acceptance and physical application are separate acknowledgements.
+Schedule/settings acceptance and physical application are separate
+acknowledgements.
 Every registration, ACK, and status payload must include `controller_id`,
 `controller_epoch`, the S31 device id, and `boot_id` when a boot id exists.
 
-### Schedule ACK
+### Acceptance ACK
 
-Sent after the S31 validates and stores a schedule.
+Sent after the S31 validates and stores a Profile A schedule or a Profile B
+settings snapshot.
 
 ```json
 {
@@ -548,9 +756,11 @@ Sent after the S31 validates and stores a schedule.
   "s31_id": "s31-kitchen",
   "controller_id": "coreink-001",
   "boot_id": "s31-boot-0098",
+  "ack_type": "SCHEDULE",
   "accepted": true,
   "controller_epoch": "Qmb2Tj6pRkq3x9sW5vL0Yg",
   "schedule_generation": 1842,
+  "settings_generation": null,
   "accepted_at_utc": 1784238602,
   "accepted_at_uptime_ms": 421000,
   "cached_transition_count": 2,
@@ -575,13 +785,14 @@ expired_schedule
 invalid_transition_order
 unsupported_protocol_version
 storage_failed
+calendar_engine_unsupported
 ```
 
 Duplicate same-`schedule_generation` same-payload schedules are accepted
 idempotently and reported as already cached.
 
-On `storage_failed`, the S31 must preserve the previous valid schedule if
-possible. If no previous valid schedule exists, it enters fail-safe.
+On `storage_failed`, the S31 must preserve the previous valid schedule/settings
+if possible. If no previous valid schedule/settings exists, it enters fail-safe.
 
 If S31 time is invalid, the S31 may still authenticate, validate structure, and
 store a newer schedule. The ACK must make the execution state explicit:
@@ -662,8 +873,12 @@ important events.
   "last_controller_seen_utc": 1784238602,
   "controller_epoch": "Qmb2Tj6pRkq3x9sW5vL0Yg",
   "cached_schedule_generation": 1842,
+  "cached_settings_generation": null,
+  "calendar_engine_version": null,
   "schedule_valid": true,
+  "settings_valid": null,
   "schedule_valid_until_utc": 1784411400,
+  "settings_valid_until_utc": null,
   "transition_horizon_until_utc": 1785456000,
   "requested_relay_state": "ON",
   "relay_output_state": "ON",
@@ -677,7 +892,7 @@ important events.
 }
 ```
 
-## Stale Command Rules
+## Profile A Stale Schedule Rules
 
 S31 must reject a schedule when:
 
@@ -699,6 +914,29 @@ S31 must reject a schedule when:
 S31 may accept a higher-`schedule_generation` schedule while currently in
 fail-safe, but it may not execute time-based transitions until local time is
 valid.
+
+## Profile B Stale Settings Rules
+
+S31 must reject a settings snapshot when:
+
+- `protocol_version` is unsupported.
+- `controller_id` does not match the paired controller.
+- `controller_epoch` does not match the paired epoch.
+- `target_device_id` does not match the S31.
+- CRC fails.
+- HMAC is required and fails.
+- `settings_generation` is lower than the cached `settings_generation` for that
+  epoch.
+- `settings_generation` equals the cached `settings_generation` but the payload
+  differs.
+- S31 time is valid and `created_at_utc` is implausibly far in the future.
+- S31 time is valid and `valid_until_utc` is already expired.
+- Required calendar/zmanim/timezone fields are missing or out of range.
+- `calendar_engine_min_version` is newer than the S31 firmware supports.
+
+S31 may accept and store a higher-`settings_generation` snapshot while currently
+in fail-safe or while local time is invalid, but it may not execute
+calendar-derived relay policy until local time and settings freshness are valid.
 
 ## Fail-Safe Behavior
 
@@ -761,24 +999,35 @@ power interruption, brownout-like rapid cycling, and repeated Wi-Fi failure.
 On S31 boot:
 
 1. Generate a new `boot_id`.
-2. Load cached schedule, persisted `controller_epoch`, and persisted
-   `schedule_generation`.
+2. Load cached schedule/settings, persisted `controller_epoch`, and persisted
+   generation counters.
 3. Join the configured CoreInk SoftAP. V2 may add a home-LAN network path.
 4. Attempt time sync from CoreInk or configured local source.
-5. If time is valid and cached schedule is valid, apply the correct current
-   state from the cached schedule.
-6. If not valid, enter fail-safe.
-7. Report status to CoreInk when the link is available.
+5. In Profile A, if time is valid and cached schedule is valid, apply the
+   correct current state from the cached schedule.
+6. In Profile B, if time is valid and cached settings are valid, calculate and
+   apply the correct current state locally.
+7. If not valid, enter fail-safe.
+8. Report status to CoreInk when the link is available.
 
 On CoreInk seeing an S31:
 
 1. Read S31 status.
-2. Compare `cached_schedule_generation`, `boot_id`, time validity, and relay
-   output state.
-3. If the S31 lacks the current schedule, push the full current schedule.
-4. If the S31 has the current schedule but wrong relay output or button-lock
-   state, push or request confirmation of the idempotent current policy.
-5. If CoreInk time is invalid, do not send a new schedule. Surface the fault.
+2. Compare `cached_schedule_generation` or `cached_settings_generation`,
+   `boot_id`, time validity, firmware/calendar-engine version, and relay output
+   state.
+3. In Profile A, if the S31 lacks the current schedule, push the full current
+   schedule.
+4. In Profile B, if the S31 lacks the current settings, push the full settings
+   snapshot and request a policy report.
+5. In Profile A, if the S31 has the current schedule but wrong relay output or
+   button-lock state, push or request confirmation of the idempotent current
+   policy.
+6. In Profile B, if the S31 reports a calculated policy that disagrees with
+   CoreInk or other S31s, surface disagreement and request a detailed report or
+   re-push settings.
+7. If CoreInk time is invalid, do not send trusted time, new schedules, or new
+   settings snapshots. Surface the fault.
 
 ## Calendar Engine Boundary
 
@@ -802,9 +1051,12 @@ failsafe_policy
 Device-specific code then applies the policy:
 
 - On legacy standalone S31 firmware, the policy can still drive local GPIO.
-- On CoreInk controller firmware, the policy becomes a schedule packet for one
-  or more S31 satellites.
-- On S31 satellite firmware, no calendar calculation is required for normal
-  operation; it consumes schedules and reports physical state.
+- In Profile A CoreInk controller firmware, the policy becomes a schedule packet
+  for one or more S31 satellites.
+- In Profile A S31 satellite firmware, no calendar calculation is required for
+  normal operation; it consumes schedules and reports physical state.
+- In Profile B S31 firmware, the same calendar engine runs locally and emits
+  policy directly on the S31, while CoreInk optionally runs it as a reference
+  calculation.
 
 This is the dividing line for the refactor.

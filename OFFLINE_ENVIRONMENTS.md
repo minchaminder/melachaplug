@@ -43,6 +43,33 @@ supporting data it needs.
 - OTA updates are local-network capable when the user has a firmware file and
   local network access.
 
+## CoreInk Console Alternative
+
+The current S31-local calculation model aligns with the maintainer-first
+CoreInk approach:
+
+- Keep the full Melacha Plug calendar/zmanim brain on every S31.
+- Use CoreInk as the house clock, setup console, status display, and settings
+  distributor.
+- Let each S31 calculate its own current policy and next transition after it has
+  valid time and a valid settings snapshot.
+- Have each S31 report its calculated policy, next transition, settings
+  generation, and calendar-engine version back to CoreInk.
+- Have CoreInk display disagreement instead of silently choosing one plug as
+  correct.
+
+This is a good offline fit because, after initialization, a powered S31 can keep
+operating even if CoreInk reboots or disappears, subject to its local time
+uncertainty and settings-expiry policy.
+
+The cost is firmware discipline. Every S31 must carry the same tested calendar
+engine, support the same settings schema, and reject stale or unauthenticated
+settings. CoreInk must track versions and surface mismatches.
+
+ESP-NOW may be used for the CoreInk-to-S31 control link in this profile because
+time/settings/status messages can be kept small. It should not be described as
+mesh; any forwarding or repeating must be implemented separately and tested.
+
 ## Current Offline Challenges
 
 ### 1. Web UI Assets Must Be Served Locally
