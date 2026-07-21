@@ -23,9 +23,16 @@ Primary example: **Athom US Key Switch Made For ESPHome** (SKU `SW13-ESP-1US`).
 | MCU (from 31 Oct 2025) | ESP32-C3 (4MB) |
 | Load | Relay, up to 1200W |
 | Control | Button + automation / schedules |
+| Optional local radio | ESP-NOW-capable on ESP32-C3 builds |
 | Official stock YAML | [`athom-1gang-switch.yaml`](https://github.com/athom-tech/esp32-configs/blob/main/athom-1gang-switch.yaml) |
 
 Older units of the same SKU used ESP8285. Calendar timers assume a Melacha calendar engine on-device (or on a paired brain such as CoreInk). ESP32-C3 is the preferred target for richer schedule UI and local zmanim.
+
+ESP-NOW is a viable optional transport on the ESP32-C3 version. It is not assumed
+to be enabled by the stock product YAML, and it must not change relay semantics:
+ESP-NOW relay commands go through the same guarded command path as web, API, and
+physical-button actions. Older ESP8285 units are not the target for this
+ESP-NOW path.
 
 ---
 
@@ -173,6 +180,23 @@ Recommended product defaults:
 - Optional per-schedule flag: **Respect melacha lockout** — if on, schedule edges that would turn the relay ON while melacha is forbidden are skipped (or forced OFF). Default **off** for “urn / timer” use cases; **on** for “don’t accidentally heat water on Shabbos” use cases.
 - Override Shabbos Mode (existing switch) still wins for manual recovery.
 
+Manual and live command handling for wall-switch builds:
+
+- On weekdays, a physical wall-button press is a user command. It should toggle
+  the relay immediately and remain the current manual state until the next
+  explicit schedule edge, protected-period transition, or user command. The
+  periodic Melacha check must not blindly force the weekday relay state every
+  minute.
+- During Shabbos / Yom Tov, live relay commands are ignored or rejected from all
+  interactive paths: physical button, web UI, Home Assistant/API, and ESP-NOW.
+  The device may still execute preconfigured schedule/policy edges if the
+  product setting allows them; those are scheduled policy actions, not live user
+  commands.
+- All relay command sources must use the same guarded relay setter/script. The
+  raw relay GPIO switch must not be exposed as an unguarded writable control.
+- Exiting Shabbos / Yom Tov unlocks live commands, but must not replay button,
+  API, web, or ESP-NOW commands that arrived while locked.
+
 ---
 
 ## Conflict resolution
@@ -255,6 +279,11 @@ On-device (or CoreInk Profile A), rules compile into a rolling list of absolute 
 
 Standalone Athom US Key Switch is the simplest user story for this doc: configure schedules on the device web UI, run locally with Melacha zmanim.
 
+Wi-Fi / HTTP remains the baseline transport. ESP-NOW can be added for
+ESP32-C3-to-ESP32-C3 local command/status messages, but it is only a transport:
+pairing, channel management, acknowledgements, and retries do not replace the
+local relay guard or Shabbos/Yom Tov lockout rules above.
+
 Related docs:
 
 - [`ZMANIM_MODE_PLAN.md`](./ZMANIM_MODE_PLAN.md) — how shkiah / RT / tzeit are computed
@@ -280,6 +309,8 @@ Related docs:
 - [ ] Saturday chatzos + 1h and Rabbeinu Tam + 1h resolve with current location + zmanim mode.
 - [ ] Power loss mid-schedule: after time is valid again, relay matches latest due edge, not a replay of every missed edge.
 - [ ] With `respect_melacha_lockout: true`, ON edges during melacha-forbidden windows are suppressed; with `false`, they run (button still locked by Shabbos mode).
+- [ ] Weekday wall-button toggles are not overwritten by the next periodic Melacha check; they persist until a schedule edge, protected-period transition, or later user command.
+- [ ] During Shabbos / Yom Tov, physical button, web, API, Home Assistant, and ESP-NOW live relay commands cannot change the relay.
 
 ---
 
