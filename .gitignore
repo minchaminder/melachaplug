@@ -5,3 +5,5 @@
 /.deps/
 /.platformio/
 /.venv/
+.cursor/
+.githooks/
