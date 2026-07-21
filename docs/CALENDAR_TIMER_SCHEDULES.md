@@ -17,6 +17,10 @@ This is **appliance automation**, not a replacement for Melacha Plug’s existin
 
 Primary example: **Athom US Key Switch Made For ESPHome** (SKU `SW13-ESP-1US`).
 
+Parallel plug target: **Athom ESP32-C3 US Plug Made For ESPHome** (SKU
+`PG03V3-US16A-ESP-1`) is tracked separately in
+[`ATHOM_ESP32C3_US_PLUG_PLAN.md`](./ATHOM_ESP32C3_US_PLUG_PLAN.md).
+
 | Item | Value |
 | --- | --- |
 | Form factor | US single-gang wall switch |
@@ -286,7 +290,9 @@ local relay guard or Shabbos/Yom Tov lockout rules above.
 
 Related docs:
 
+- [`PARALLEL_DEVICE_ARCHITECTURE_PLAN.md`](./PARALLEL_DEVICE_ARCHITECTURE_PLAN.md) — shared core, Shabbos Timer, hardware targets, and build matrix
 - [`ZMANIM_MODE_PLAN.md`](./ZMANIM_MODE_PLAN.md) — how shkiah / RT / tzeit are computed
+- [`ATHOM_ESP32C3_US_PLUG_PLAN.md`](./ATHOM_ESP32C3_US_PLUG_PLAN.md) — PG03V3-US16A ESP32-C3 plug support plan
 - [`COREINK_OFFLINE_PRODUCT_PLAN.md`](./COREINK_OFFLINE_PRODUCT_PLAN.md) — brain + relay split
 - [`COREINK_S31_PROTOCOL.md`](./COREINK_S31_PROTOCOL.md) — compiled transition packets
 
